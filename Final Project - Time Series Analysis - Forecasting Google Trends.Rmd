@@ -1,0 +1,1074 @@
+---
+title: "Final Project in Time Series Analysis: forecasting Google trends with
+VAR AND ARIMA models"
+author: "Lin Xinyang"
+date: "2023-05-27"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+  word_document: default
+topic: Forecating the number of queries in Google Search Engine of two phrases in
+  music, rock and roll and heavy metal by using VAR and ARIMA models.
+---
+
+## 1. Loading Packages
+
+Firstly, let's load packages we need for our analysis.
+
+```{r setup,warning=FALSE,message=FALSE,eval=TRUE}
+options(repos = c(CRAN = "https://cloud.r-project.org"))
+install.packages("gtrendsR")
+install.packages("dplyr")
+install.packages("lmtest")
+install.packages("tidyverse")
+install.packages("xts")
+install.packages("tseries")
+install.packages("urca")
+install.packages("fUnitRoots")
+install.packages("knitr")
+install.packages("forecast")
+install.packages("quantmod")
+install.packages("vars")
+install.packages("formattable")
+install.packages("ggplot2")
+source(file="D://Desktop//function_plot_ACF_PACF_resids.R")
+source(file="D://Desktop//testdf.R")
+
+library(gtrendsR)
+library(dplyr)
+library(lmtest)
+library(tidyverse)
+library(xts)
+library(tseries)
+library(urca)
+library(fUnitRoots)
+library(knitr)
+library(forecast)
+library(quantmod)
+library(vars)
+library(formattable)
+library(ggplot2)
+```
+
+## 2. Import Data We Need
+
+We need to import data from Google Search Engine First
+
+```{r}
+set.seed(123)
+```
+
+```{r}
+rock_and_roll <- gtrends(keyword =c("rock and roll"),
+                         gprop = "web",
+                         time= "2004-01-01 2016-06-01")
+```
+
+We need to extract data from the column called "hits"
+
+```{r}
+rock_and_roll <- rock_and_roll$interest_over_time[,1:2]
+rock_and_roll
+class(rock_and_roll)
+```
+
+Then we perform the same steps to our second phrase "heavy metal"
+
+```{r}
+heavy_metal <- gtrends(keyword = c("heavy metal"), 
+                       gprop = "web",
+                       time= "2004-01-01 2016-06-01")
+
+heavy_metal<-heavy_metal$interest_over_time[,1:2]
+```
+
+Then we need to combine two data sets in one data frame
+
+```{r}
+rock_and_roll_heavy_metal <- cbind(rock_and_roll,heavy_metal$hits)
+colnames(rock_and_roll_heavy_metal) <- c("date","rock_and_roll","heavy_metal")
+rock_and_roll_heavy_metal
+
+```
+
+In the next step, we need coerce "rock_and_roll_heavy_metal" into xts
+
+```{r}
+options(xts_check_TZ = FALSE)
+rock_and_roll_heavy_metal <- xts(rock_and_roll_heavy_metal[,-1],rock_and_roll_heavy_metal$date)
+rock_and_roll_heavy_metal
+class(rock_and_roll_heavy_metal)
+```
+
+## 3.Build a VAR model
+
+(1) **First thing first,** let's check their stationarity , and if they are both non-stationary, we also need to examine whether they are integrated of the same order.
+
+```{r}
+plot(rock_and_roll_heavy_metal[,1:2],
+     col=c("red","blue"),
+     major.ticks="years",
+     grid.ticks.on= "years",
+     grid.ticks.lty=3,
+     main= "Rock and Roll vs Heavy Metal")
+```
+
+Judging from the graph, it is obvious that they don't look stationary. But we also need to perform ADF test to further confirm.
+
+```{r}
+
+testdf(rock_and_roll_heavy_metal$rock_and_roll,max.augmentations =5)
+testdf(rock_and_roll_heavy_metal$heavy_metal,max.augmentations = 5)
+```
+
+Based on the p-values of ADF and BG tests in the first row above, we conclude that both data sets are non-stationary. Next let's difference both data sets.
+
+```{r}
+rock_and_roll_heavy_metal$rr_d <- diff(rock_and_roll_heavy_metal$rock_and_roll)
+rock_and_roll_heavy_metal$hm_d <- diff(rock_and_roll_heavy_metal$heavy_metal)
+testdf(rock_and_roll_heavy_metal$rr_d,max.augmentations = 5)
+testdf(rock_and_roll_heavy_metal$hm_d,max.augmentations = 5)
+```
+
+After the first differencing, p-values of both are smaller than 0.05, so the null hypothesis of ADF test assuming the existence of a unit root can be rejected. This suggests that both are integrated of the order 1; also BG test suggests that the error terms of both data sets are stationary
+
+(2) **Let's figure out their linear combination**
+
+```{r}
+linr_comb <- lm(rock_and_roll ~ heavy_metal, data=rock_and_roll_heavy_metal)
+summary(linr_comb)
+testdf(variable = residuals(linr_comb),max.augmentations = 3)
+```
+
+ADF test with 0 lag rejects the null hypothesis of non-staionarity. Therefore its error term is stationary. In conclusion, "rock and roll" and "heavy metal" can be co-integrated .
+
+(3) **Let's perform Granger causality test to further confirm their cointegration.**
+
+```{r}
+grangertest(  heavy_metal~rock_and_roll,
+              data=rock_and_roll_heavy_metal,
+              order=4 )
+
+grangertest(  rock_and_roll~heavy_metal,
+              data=rock_and_roll_heavy_metal,
+              order=2 )
+
+
+grangertest(  rock_and_roll~heavy_metal,
+              data=rock_and_roll_heavy_metal,
+              order=3 )
+
+
+grangertest(  rock_and_roll~heavy_metal,
+              data=rock_and_roll_heavy_metal,
+              order=4 )
+```
+
+Results from above show that we could reject the null hypothesis of Granger causality test assuming A does not Granger cause B. The test above signifies that both variables have correlation. "rock and roll" and "heavy metal" are co-integrated, which suggests us to build a VAR model.
+
+Let's remove the third and fourth columns about the data of the first differencing.
+
+```{r}
+rock_and_roll_heavy_metal<-rock_and_roll_heavy_metal[,-c(3,4)]
+rock_and_roll_heavy_metal
+```
+
+4.  **Let's select a suitable VAR model for both variables.**
+
+```{r}
+var_selection <- VARselect(y=rock_and_roll_heavy_metal,lag.max=10)
+var_selection
+```
+
+Information criteria AIC,FPE suggest 5 lags while HQ and SC prefers 2 lags.
+
+```{r}
+var_5 <- VAR(y=rock_and_roll_heavy_metal,p=5)
+summary(var_5)
+```
+
+Let's try other models.
+
+```{r}
+var_2 <-VAR(y=rock_and_roll_heavy_metal,p=2)
+summary(var_2)
+var_6 <-VAR(y=rock_and_roll_heavy_metal,p=6)
+summary(var_6)
+var_7 <-VAR (y= rock_and_roll_heavy_metal,p=7)
+summary (var_7)
+var_8 <- VAR(y=rock_and_roll_heavy_metal,p=8)
+summary(var_8)
+var_9 <- VAR (y=rock_and_roll_heavy_metal,p=9)
+summary (var_9)
+var_10<- VAR (y=rock_and_roll_heavy_metal,p=10)
+summary (var_10)
+```
+
+In all of models above, some parameters are insignificant, but let's examine whether there is autocorrelation in their respective residuals.
+
+5.  **Let's diagnose the residuals**
+
+```{r}
+serial.test(x=var_2) #(Portmanteau test)
+serial.test(x=var_2,type="BG") #(BG test)
+
+serial.test(x=var_5) #(Portmanteau test)
+serial.test(x=var_5,type="BG") #(BG test)
+
+serial.test(x=var_6) #(Portmanteau test)
+serial.test(x=var_6,type="BG") #
+
+serial.test(x=var_7) #(Portmanteau test)
+serial.test(x=var_7,type="BG") #(BG test)
+
+serial.test(x=var_8) #(Portmanteau test)
+serial.test(x=var_8,type="BG") #(BG test)
+
+serial.test(x=var_9) #(Portmanteau test)
+serial.test(x=var_9,type="BG") #(BG test)
+
+serial.test(x=var_10) #(Portmanteau test)
+serial.test(x=var_10,type="BG") #(BG test)
+
+```
+
+Based on the Portmanteau and BG test above, it seems only VAR(2) show no autocorrelation in their residuals.
+
+We can also use graph to check autocorrelation
+
+```{r}
+windows(width=8, height=8)
+plot(var_2)
+```
+
+First graph: the original and fitted values; Second graph: residuals from the model seem like white noise; Third graph: ACF and PACF of residuals; the 12th lag is still significant.
+
+6.  **Impulse Response Function**
+
+```{r}
+plot(irf(var_2, n.ahead = 40))
+```
+
+As we can see that as time goes by, the effect of shock decays.
+
+```{r}
+plot(fevd(var_2, n.ahead = 40))
+```
+
+FEVD for "rock and roll" shows "rock and roll" has larger impact while FEVD for "heavy metal" shows "heavy metal" has larger impact.
+
+7.  **12-month periods ahead forecast with VAR(2,2)**
+
+```{r}
+tail(rock_and_roll_heavy_metal,14)
+rock_and_roll_heavy_metal.short <- rock_and_roll_heavy_metal["/2016-06-01",]
+tail(rock_and_roll_heavy_metal.short)
+```
+
+In the codes above, we need to cut one-year data from the original data set. Then in the next step, we need to use VAR(7,2) to fit the shortened data and perform forecast.
+
+```{r}
+var2_short <- VAR (rock_and_roll_heavy_metal.short,p = 2,type=c("none"))
+var2_short_forecast <- predict(var2_short,
+                               n.ahead = 12,
+                               ci= 0.95)
+```
+
+We need to extract data from "fcst" columns for both "rock and roll" and "heavy metal".
+
+```{r}
+var2_short_forecast 
+var2_short_forecast$fcst$rock_and_roll
+var2_short_forecast$fcst$heavy_metal
+tail(index(rock_and_roll_heavy_metal),12)
+```
+
+Let's then coerce predicted data into xts and rename each column for "rock and roll".
+
+```{r}
+rock_and_roll_forecast <- xts(var2_short_forecast$fcst$rock_and_roll[,-4],
+                  order.by = tail(index(rock_and_roll_heavy_metal),12))
+
+colnames(rock_and_roll_forecast) <-c("rr_fore","rr_lower","rr_upper")
+rock_and_roll_forecast
+```
+
+We then do perform the same logic to "heavy metal".
+
+```{r}
+heavy_metal_forecast <- xts (var2_short_forecast$fcst$heavy_metal[,-4],
+                 order.by = tail(index(rock_and_roll_heavy_metal),12))
+colnames(heavy_metal_forecast) <-c("hm_fore","hm_lower","hm_upper")
+heavy_metal_forecast
+```
+
+Finally, let's merge them together with the original data.
+
+```{r}
+rr_hm_merged <- merge( rock_and_roll_heavy_metal,
+                     rock_and_roll_forecast,
+                     heavy_metal_forecast)
+rr_hm_merged
+```
+
+Let's plot the result of forecasting for "rock and roll" first.
+
+```{r}
+plot(rr_hm_merged["2014/",c("rock_and_roll","rr_fore","rr_lower","rr_upper")],
+     major.ticks="years",
+     grid.ticks.on="years",
+     grid.tick.lty=3,
+     col=c("black","red","blue","blue"),
+     main= "12-month forecasts for rock and roll")
+```
+
+Then plot the result of forecasting for "heavy metal"
+
+```{r}
+plot(rr_hm_merged["2014/",c("heavy_metal","hm_fore","hm_lower","hm_upper")],
+     major.ticks="years",
+     grid.ticks.on="years",
+     grid.tick.lty=3,
+     col=c("black","red","blue","blue"),
+     main= "12-month forecasts for heavy metal")
+```
+
+Finally, let's perform ex-post forecast error measures.
+
+```{r}
+rr_hm_merged$mae.rock_and_roll<-  abs(rr_hm_merged$rock_and_roll - rr_hm_merged$rr_fore)
+rr_hm_merged$mse.rock_and_roll <-  (rr_hm_merged$rock_and_roll - rr_hm_merged$rr_fore) ^ 2
+rr_hm_merged$mape.rock_and_roll<-  abs((rr_hm_merged$rock_and_roll - rr_hm_merged$rr_fore)/rr_hm_merged$rock_and_roll)
+rr_hm_merged$amape.rock_and_roll <-  abs((rr_hm_merged$rock_and_roll - rr_hm_merged$rr_fore) / 
+                            (rr_hm_merged$rock_and_roll + rr_hm_merged$rr_fore))
+
+rr_hm_merged$mae.heavy_metal<-  abs(rr_hm_merged$heavy_metal - rr_hm_merged$hm_fore)
+rr_hm_merged$mse.heavy_metal <-  (rr_hm_merged$heavy_metal - rr_hm_merged$hm_fore) ^ 2
+rr_hm_merged$mape.heavy_metal<-  abs((rr_hm_merged$heavy_metal - rr_hm_merged$hm_fore)/rr_hm_merged$heavy_metal)
+rr_hm_merged$amape.heavy_metal<-  abs((rr_hm_merged$heavy_metal - rr_hm_merged$hm_fore) / 
+                                             (rr_hm_merged$heavy_metal + rr_hm_merged$hm_fore))
+
+tail(rr_hm_merged,12)
+dim(rr_hm_merged)
+var2_error_measures_rock_and_roll <- colMeans(rr_hm_merged[,9:12],na.rm = TRUE)
+var2_error_measures_rock_and_roll
+var2_error_measures_heavy_metal <-colMeans(rr_hm_merged[,13:16],na.rm = TRUE)
+var2_error_measures_heavy_metal
+
+```
+
+For convenience, here we separate error measures of "rock and roll" and "heavy metal" for comparison with those produced by two ARIMA models later.
+
+## 4.ARIMA models for "rock and roll"
+
+1.  **Let's load data first and perform certain steps to extract important data we need for analysis.**
+
+```{r}
+rock_and_roll.2 <- gtrends(keyword =c("rock and roll"),
+                      gprop = "web",
+                      time= "2004-01-01 2016-06-01")
+
+rock_and_roll.2$interest_over_time
+rock_and_roll.2<- rock_and_roll.2$interest_over_time[,1:2]
+rock_and_roll.2 <-xts(rock_and_roll.2[,-1],order.by=rock_and_roll.2$date)
+colnames(rock_and_roll.2) <- "rock_and_roll"
+rock_and_roll.2
+```
+
+2.  **Let's test stationarity and determine the order of integration (d)**
+
+```{r}
+plot(rock_and_roll.2,
+     col="red",
+    major.ticks="years",
+   grid.ticks.on="years",
+   grid.ticks.lty=3,
+   main="Original data for rock and roll")
+```
+
+The gragh signifies very obvious non-stationarity, but we need to perform DF and ADF to confirm further instead of only passing judgement from the graph.
+
+```{r}
+testdf(rock_and_roll.2$rock_and_roll,max.augmentations = 4)
+```
+
+p-value with 0 lag is higher than 0.05, which rejects stationarity. Now let's perform the first differencing.
+
+```{r}
+rock_and_roll.2$diff <- diff(rock_and_roll.2$rock_and_roll)
+
+plot(rock_and_roll.2$diff,
+     col="blue",
+     major.ticks="years",
+     grid.ticks.on="years",
+     grid.ticks.lty=3,
+     main="The first difference of rock and roll")
+```
+
+The graph seems like white noise.
+
+```{r}
+testdf(rock_and_roll.2$diff,max.augmentations = 4)
+```
+
+Based on ADF test, it is stationary, and there is no autocorrelation in its residuals according to BG test , so the order of integration is 1.
+
+3.  **In the next step, we should determine p and q**
+
+```{r}
+par(mfrow = c(2, 1)) 
+acf(rock_and_roll.2$diff,
+    lag.max = 45,
+    ylim = c(-0.5, 0.5),
+    lwd = 2,                  
+    col = "darkred",
+    na.action = na.pass)   
+pacf(rock_and_roll.2$diff, 
+     lag.max = 45, 
+     ylim=c(-0.5,0.5),
+     lwd = 2,
+     col = "darkred",
+     na.action = na.pass)
+```
+
+According to ACF and PACF graphs, many lags are significant. Let's try ARIMA(1,1,1) first.
+
+```{r}
+arima_111 <- Arima(rock_and_roll.2$rock_and_roll,order=c(1,1,1),include.constant = TRUE)
+```
+
+4.  **We then need to check parameters of ARIMA models**
+
+```{r}
+coeftest(arima_111)
+```
+
+5.  **Diagnostics: let's check whether there is autocorrelation in the residuals**
+
+plotting the residuals:
+
+```{r}
+plot(resid(arima_111),
+     col="darkred",
+  main="Residuals of ARIMA(1,1,1)") # The residuals look like white noise 
+```
+
+ACF and PACF graphs for the residuals:
+
+```{r}
+par(mfrow = c(2, 1)) 
+acf(resid(arima_111), 
+    lag.max = 40,
+    ylim = c(-0.5, 0.5), 
+    lwd = 3, col = "darkred",
+    na.action = na.pass)
+pacf(resid(arima_111),
+     lag.max =40, 
+     ylim = c(-0.5, 0.5),
+     lwd =3, col = "darkred",
+     na.action = na.pass)
+```
+
+Some lags are still significant and many are on the edge; however,plotting ACF and PACF is not formal way to test the existence of autocorrelation in the residuals.
+
+Ljung-Box test as a formal way to check residuals:
+
+```{r}
+Box.test(resid(arima_111),type = c("Ljung-Box"),lag = 5)
+```
+
+p-value is larger than 0.05, so we cannot reject the null hypothesis. There is no autocorrelation it its residuals. In conclusion, we could consider ARIMA(1,1,1).
+
+6.  **Let's also try other models following the same steps shown above**
+
+-   ARIMA(1,1,2)
+
+```{r}
+arima_112<-Arima(rock_and_roll.2$rock_and_roll,order=c(1,1,2),include.constant = TRUE)
+coeftest(arima_112)
+```
+
+Let's check residuals
+
+```{r}
+plot(resid(arima_112),
+     col="darkred",
+  main="Residuals of ARIMA(1,1,2)")
+
+par(mfrow = c(2, 1)) 
+acf(resid(arima_112), 
+    lag.max = 40,
+    ylim = c(-0.5, 0.5), 
+    lwd = 3, col = "darkred",
+    na.action = na.pass)
+pacf(resid(arima_112),
+     lag.max =40, 
+     ylim = c(-0.5, 0.5),
+     lwd =3, col = "darkred",
+     na.action = na.pass)
+
+Box.test(resid(arima_112),type = c("Ljung-Box"),lag = 5)
+```
+
+arima_112 could work
+
+-   ARIMA(1,1,5)
+
+```{r}
+arima_115<-Arima(rock_and_roll.2$rock_and_roll,order=c(1,1,5),include.constant = TRUE)
+coeftest(arima_115)
+```
+
+Most parameters are insignificant
+
+-   ARIMA(3,1,4)
+
+```{r}
+arima_314<-Arima(rock_and_roll.2$rock_and_roll,order=c(3,1,4),include.constant = TRUE)
+coeftest(arima_314)
+```
+
+Then let's diagnoize autocorrelation in its residuals.
+
+```{r}
+plot(resid(arima_314),
+     col="darkred",
+     main="Residuals of ARIMA(3,1,4)",
+)
+
+par(mfrow = c(2, 1)) 
+acf(resid(arima_314), 
+    lag.max = 40,
+    ylim = c(-0.5, 0.5), 
+    lwd = 3, col = "darkred",
+    na.action = na.pass)
+pacf(resid(arima_314),
+     lag.max =40, 
+     ylim = c(-0.5, 0.5),
+     lwd =3, col = "darkred",
+     na.action = na.pass)
+
+Box.test(resid(arima_314),type = c("Ljung-Box"),lag = 5)
+
+```
+
+There is no autocorrelation in the residuals, so arima_314 could work.
+
+-   ARIMA(4,1,5)
+
+```{r}
+arima_415<-Arima(rock_and_roll.2$rock_and_roll,order=c(4,1,5))
+coeftest(arima_415)
+
+plot(resid(arima_415),
+     col="darkred",
+     main="Residuals of ARIMA(4,1,5)")
+
+par(mfrow = c(2, 1)) 
+acf(resid(arima_415), 
+    lag.max = 40,
+    ylim = c(-0.5, 0.5), 
+    lwd = 3, col = "darkred",
+    na.action = na.pass)
+pacf(resid(arima_415),
+     lag.max =40, 
+     ylim = c(-0.5, 0.5),
+     lwd =3, col = "darkred",
+     na.action = na.pass)
+```
+
+```{r}
+Box.test(resid(arima_415),type = c("Ljung-Box"),lag = 5)
+```
+
+we can consider arima_415 as well.
+
+-   ARIMA(5,1,1)
+
+```{r}
+arima_511<-Arima(rock_and_roll.2$rock_and_roll,order=c(5,1,1),include.constant = FALSE)
+coeftest(arima_511)
+```
+
+Most parameters are insignificant.
+
+Let's use information criteria to make comparison
+
+```{r}
+AIC(arima_111, arima_415,arima_314,arima_112)
+BIC(arima_111, arima_415,arima_314,arima_112)
+```
+
+AIC suggests arima_314 while BIC suggests arima_111.
+
+7.  **Let's perform 12-month ahead forecast by using arima_111 first**
+
+We should upload data, extract data we need and merger the predicted data and the original data like what we did when using VAR(2,2).
+
+```{r}
+rock_and_roll.2
+rock_and_roll.2<-rock_and_roll.2[,-2]
+tail(rock_and_roll.2,13)
+rock_and_roll.2.cut<- rock_and_roll.2["/2015-06-01",]
+tail(rock_and_roll.2.cut)
+
+rr_arima_111 <- Arima(rock_and_roll.2.cut$rock_and_roll,
+                        order=c(1,1,1),
+                        include.constant = TRUE)
+
+arima_111_forecast <- forecast(rr_arima_111,
+                              h=12)
+arima_111_forecast$mean
+arima_111_forecast$lower[,2]
+arima_111_forecast$upper[,2]
+
+forecast.data <- data.frame(mean=as.numeric(arima_111_forecast$mean),
+                        lower=as.numeric(arima_111_forecast$lower[,2]),
+                        upper=as.numeric(arima_111_forecast$upper[,2]))
+
+forecast.data.xts <- xts(forecast.data,
+                        order.by = tail(index(rock_and_roll.2),12))
+
+rock_and_roll.2.2 <- merge(rock_and_roll.2,forecast.data.xts)
+rock_and_roll.2.2
+```
+
+Let's plot them together in a graph.
+
+```{r}
+plot(rock_and_roll.2.2["2014/",c("rock_and_roll","mean","lower","upper")],
+     major.ticks = "years", 
+     grid.ticks.on = "years",
+     grid.ticks.lty = 3,
+     main = "12-month forecasts of rock and roll with ARIMA(1,1,1)",
+     col = c("black", "blue", "red", "red"))
+```
+
+Finally let's perform error measures.
+
+```{r}
+rock_and_roll.2.2$mae.rock_and_roll<-  abs(rock_and_roll.2.2$rock_and_roll - rock_and_roll.2.2$mean)
+rock_and_roll.2.2$mse.rock_and_roll <-  (rock_and_roll.2.2$rock_and_roll - rock_and_roll.2.2$mean) ^ 2
+rock_and_roll.2.2$mape.rock_and_roll<-  abs((rock_and_roll.2.2$rock_and_roll - rock_and_roll.2.2$mean)/rock_and_roll.2.2$rock_and_roll)
+rock_and_roll.2.2$amape.rock_and_roll <-  abs((rock_and_roll.2.2$rock_and_roll - rock_and_roll.2.2$mean) / 
+                                             (rock_and_roll.2.2$rock_and_roll + rock_and_roll.2.2$mean))
+
+dim(rock_and_roll.2.2)
+error.arima111<- colMeans(rock_and_roll.2.2[,5:8],na.rm = TRUE)
+error.arima111
+```
+
+8.  **Let's also perform 12-month ahead forecast by using arima_314.2**
+
+```{r}
+rock_and_roll.2
+tail(rock_and_roll.2,13)
+rock_and_roll.2.cut<- rock_and_roll.2["/2015-06-01",]
+tail(rock_and_roll.2.cut)
+
+rr_arima_314 <- Arima(rock_and_roll.2.cut$rock_and_roll,
+                      order=c(3,1,4),
+                      include.constant = TRUE)
+
+rr_arima_314_forecast <- forecast(rr_arima_314,
+                               h=12)
+rr_arima_314_forecast$mean
+rr_arima_314_forecast$lower[,2]
+rr_arima_314_forecast$upper[,2]
+
+forecast.data.2 <- data.frame(mean=as.numeric(rr_arima_314_forecast$mean),
+                            lower=as.numeric(rr_arima_314_forecast$lower[,2]),
+                            upper=as.numeric(rr_arima_314_forecast$upper[,2]))
+
+forecast.data.2.xts <- xts(forecast.data.2,
+                         order.by = tail(index(rock_and_roll.2),12))
+
+rock_and_roll.2.3 <- merge(rock_and_roll.2,forecast.data.2.xts)
+```
+
+let's plot them together in a graph.
+
+```{r}
+plot(rock_and_roll.2.3["2014/",c("rock_and_roll","mean","lower","upper")],
+     major.ticks = "years", 
+     grid.ticks.on = "years",
+     grid.ticks.lty = 3,
+     main = "12-month forecast of rock and roll with ARIMA(3,1,4)",
+     col = c("black", "blue", "red", "red"))
+```
+
+Let's perform error measures
+
+```{r}
+rock_and_roll.2.3$mae.rock_and_roll<-  abs(rock_and_roll.2.3$rock_and_roll - rock_and_roll.2.3$mean)
+rock_and_roll.2.3$mse.rock_and_roll <-  (rock_and_roll.2.3$rock_and_roll - rock_and_roll.2.3$mean) ^ 2
+rock_and_roll.2.3$mape.rock_and_roll<-  abs((rock_and_roll.2.3$rock_and_roll - rock_and_roll.2.3$mean)/rock_and_roll.2.3$rock_and_roll)
+rock_and_roll.2.3$amape.rock_and_roll <-  abs((rock_and_roll.2.3$rock_and_roll - rock_and_roll.2.3$mean) / 
+                                                (rock_and_roll.2.3$rock_and_roll + rock_and_roll.2.3$mean))
+
+dim(rock_and_roll.2.3)
+error.arima314<- colMeans(rock_and_roll.2.3[,5:8],na.rm = TRUE)
+error.arima314
+```
+
+9.  **Let's compare arima_111 with arima_314**
+
+```{r}
+error.arima111
+error.arima314
+rbind(error.arima111,error.arima314)
+```
+
+arima_111 can produce a little bit more accurate forecasts than arima_314. So let's use arima111
+
+## 5.ARIMA models for heavy metal
+
+1.  **Let's upload data first.**
+
+```{r}
+heavy_metal.2 <- gtrends(keyword = c("heavy metal"), 
+                   gprop = "web",
+                   time= "2004-01-01 2016-06-01")
+heavy_metal.2$interest_over_time
+heavy_metal.2<- heavy_metal.2$interest_over_time[,1:2]
+heavy_metal.2 <-xts(heavy_metal.2[,-1],order.by=heavy_metal.2$date)
+colnames(heavy_metal.2) <- "heavy_metal"
+```
+
+2.  **Second, let's test stationarity and determine d**
+
+```{r}
+plot(heavy_metal.2,
+     col="red",
+     major.ticks="years",
+     grid.ticks.on="years",
+     grid.ticks.lty=3,
+     main="Original data for heavy metal")
+```
+
+The graph shows very obvious non-staionarity. Let's also perform df test and its alternatives.
+
+```{r}
+testdf(heavy_metal.2$heavy_metal,max.augmentations = 5)
+```
+
+ADF shows non-stationarity, and BG test shows autocorrelation in its residuals.
+
+3.  **Let's determine p and q**
+
+```{r}
+heavy_metal.2$diff <- diff(heavy_metal.2)
+
+par(mfrow = c(2, 1)) 
+acf(heavy_metal.2$diff,
+    lag.max = 40,
+    ylim = c(-0.5, 0.5),   
+    lwd = 2,                  
+    col = "darkred",
+    na.action = na.pass)   
+pacf(heavy_metal.2$diff, 
+     lag.max = 40, 
+     ylim=c(-0.5,0.5),
+     lwd = 2,
+     col = "darkred",
+     na.action = na.pass)
+```
+
+4.  **Let's still start with ARIMA(1,1,1) (p=q=1)**
+
+```{r}
+arima_111_hm <- Arima(heavy_metal.2$heavy_metal,order=c(1,1,1),include.constant = TRUE)
+```
+
+5.  **Check parameters**
+
+```{r}
+coeftest(arima_111_hm)
+```
+
+6.  **Diagnostics: let's check whether there is autocorrelation in the residuals**
+
+plot:
+
+```{r}
+plot(resid(arima_111_hm),
+     col="darkred",
+     main="Residuals of ARIMA(1,1,1) for heavy metal")
+```
+
+This seems like white noise.
+
+ACF and PACF:
+
+```{r}
+par(mfrow = c(2, 1)) 
+acf(resid(arima_111_hm), 
+    lag.max = 40,
+    ylim = c(-0.5, 0.5), 
+    lwd = 3, col = "darkred",
+    na.action = na.pass)
+pacf(resid(arima_111_hm),
+     lag.max =40, 
+     ylim = c(-0.5, 0.5),
+     lwd =3, col = "darkred",
+     na.action = na.pass)
+```
+
+Some lags are still significant and many are on the edge.
+
+Ljung-Box test:
+
+```{r}
+Box.test(resid(arima_111_hm),type = c("Ljung-Box"),lag = 5)
+```
+
+p-value is larger than 0.05, so ARIMA(1,1,1) can be considered.
+
+7.  **Let's try other models.**
+
+-   ARIMA(1,1,2)
+
+```{r}
+arima_112_hm <- Arima(heavy_metal.2$heavy_metal,order=c(1,1,2),include.constant = TRUE)
+arima_112_hm
+coeftest(arima_112_hm)
+
+plot(resid(arima_112_hm),
+     col="darkred",
+     main="Residuals of ARIMA(1,1,2) for heavy metal")
+
+par(mfrow = c(2, 1)) 
+acf(resid(arima_112_hm), 
+    lag.max = 40,
+    ylim = c(-0.5, 0.5), 
+    lwd = 3, col = "darkred",
+    na.action = na.pass)
+pacf(resid(arima_112_hm),
+     lag.max =40, 
+     ylim = c(-0.5, 0.5),
+     lwd =3, col = "darkred",
+     na.action = na.pass)
+```
+
+```{r}
+Box.test(resid(arima_112_hm),type = c("Ljung-Box"),lag = 6)
+```
+
+arima_112_hm could work.
+
+-   ARIMA(3,1,1)
+
+```{r}
+arima_311_hm <- Arima(heavy_metal.2$heavy_metal,order=c(3,1,1),include.constant = TRUE)
+arima_311_hm
+coeftest(arima_311_hm)
+```
+
+The parameters of a1 and ar2 and ar3 are insignificant, so let's remove them.
+
+```{r}
+arima_311_hm.2 <- Arima(heavy_metal.2$heavy_metal,order=c(3,1,1),
+                       fixed=c(0,0,0,NA,NA),
+                       include.constant = TRUE)
+coeftest(arima_311_hm.2)
+
+plot(resid(arima_311_hm.2),
+     col="darkred",
+     main="Residuals of ARIMA(3,1,1) without a1 and ar2 for heavy metal")
+
+par(mfrow = c(2, 1)) 
+acf(resid(arima_311_hm.2), 
+    lag.max = 40,
+    ylim = c(-0.5, 0.5), 
+    lwd = 3, col = "darkred",
+    na.action = na.pass)
+pacf(resid(arima_311_hm.2),
+     lag.max =40, 
+     ylim = c(-0.5, 0.5),
+     lwd =3, col = "darkred",
+     na.action = na.pass)
+
+```
+
+```{r}
+Box.test(resid(arima_311_hm.2),type = c("Ljung-Box"),lag = 5)
+```
+
+ARIMA(3,1,1) without ar1 ar2 and ar3 could work.
+
+-   ARIMA(3,1,3)
+
+```{r}
+arima_313_hm <- Arima(heavy_metal.2$heavy_metal,order=c(3,1,3),include.constant = TRUE)
+arima_313_hm 
+coeftest(arima_313_hm)
+```
+
+The parameters of ar2,ma2,ma3 are insignificant, let'e remove them.
+
+```{r}
+arima_313_hm.2 <- Arima(heavy_metal.2$heavy_metal,
+                        order=c(3,1,3),
+                        fixed=c(NA,0,NA,NA,0,0,NA),
+                        include.constant = TRUE)
+coeftest(arima_313_hm.2)
+```
+
+```{r}
+plot(resid(arima_313_hm.2),
+     col="darkred",
+     main="Residuals of ARIMA(3,1,3) without ar2,ma2,ma3 for heavy metal")
+
+par(mfrow = c(2, 1)) 
+acf(resid(arima_313_hm.2), 
+    lag.max = 40,
+    ylim = c(-0.5, 0.5), 
+    lwd = 3, col = "darkred",
+    na.action = na.pass)
+pacf(resid(arima_313_hm.2),
+     lag.max =40, 
+     ylim = c(-0.5, 0.5),
+     lwd =3, col = "darkred",
+     na.action = na.pass)
+```
+
+```{r}
+Box.test(resid(arima_313_hm.2),type = c("Ljung-Box"),lag = 5)
+```
+
+arima_313_hm.2 could work.
+
+-   ARIMA(4,1,3)
+
+```{r}
+arima_413_hm <- Arima(heavy_metal.2$heavy_metal,order=c(4,1,3),include.constant = TRUE)
+arima_413_hm 
+coeftest(arima_413_hm)
+
+arima_413_hm.2 <- Arima(heavy_metal.2$heavy_metal,
+                        order=c(4,1,3),
+                        fixed=c(NA,NA,NA,NA,0,NA,NA,NA),
+                        include.constant = TRUE)
+coeftest(arima_413_hm.2)
+Box.test(resid(arima_413_hm.2),type = c("Ljung-Box"),lag = 5)
+```
+
+arima_413_hm.2 could work
+
+-   ARIMA(1,1,4)
+
+```{r}
+arima_114_hm <- Arima(heavy_metal.2$heavy_metal,order=c(1,1,4),include.constant = TRUE)
+arima_114_hm 
+coeftest(arima_114_hm)
+```
+
+```{r}
+Box.test(resid(arima_114_hm),type = c("Ljung-Box"),lag = 5)
+```
+
+Ljung-Box test shows no autocorrelation in its residuals. So let's remain arima_114_hm
+
+-   ARIMA(4,1,1)
+
+```{r}
+arima_411_hm <- Arima(heavy_metal.2$heavy_metal,order=c(4,1,1),include.constant = TRUE)
+arima_411_hm 
+coeftest(arima_411_hm)
+```
+
+Over half of parameters are insignificant, so we'd better not consider ARIMA(4,1,1).
+
+8.  **Let's use information criteria to make comparison**
+
+```{r}
+AIC(arima_112_hm,arima_114_hm,arima_313_hm.2,arima_311_hm.2,arima_413_hm.2)
+BIC(arima_112_hm,arima_114_hm,arima_313_hm.2,arima_311_hm.2,arima_413_hm.2)
+```
+
+AIC suggests arima_114_hm,and BIC suggests arima_311_hm.2. Let's forecast with arima_311_hm.2.
+
+9.  **Let' forecast 12-month periods ahead for "heavy metal" by using arima_311_hm.2**
+
+```{r}
+heavy_metal.2
+heavy_metal.2<-heavy_metal.2[,-2]
+tail(heavy_metal.2,13)
+heavy_metal.2.cut<- heavy_metal.2["/2015-06-01",]
+tail(heavy_metal.2.cut)
+
+heavy_metal_arima_311 <- Arima(heavy_metal.2.cut$heavy_metal,
+                          order=c(3,1,1),
+                          fixed=c(0,0,0,NA,NA),
+                          include.constant = TRUE)
+
+arima_311.2_forecast <- forecast(heavy_metal_arima_311,
+                                 h=12)
+arima_311.2_forecast$mean
+arima_311.2_forecast$lower[,2]
+arima_311.2_forecast$upper[,2]
+
+forecast.data.3 <- data.frame(mean=as.numeric(arima_311.2_forecast$mean),
+                            lower=as.numeric(arima_311.2_forecast$lower[,2]),
+                            upper=as.numeric(arima_311.2_forecast$upper[,2]))
+
+forecast.data.3.xts <- xts(forecast.data.3,
+                         order.by = tail(index(heavy_metal.2),12))
+
+heavy_metal.2.2 <- merge(heavy_metal.2,forecast.data.3.xts)
+```
+
+Let's plot them together in a graph.
+
+```{r}
+plot(heavy_metal.2.2["2014/",c("heavy_metal","mean","lower","upper")],
+     major.ticks = "years", 
+     grid.ticks.on = "years",
+     grid.ticks.lty = 3,
+     main = "12-month forecast of heavy metal with ARIMA(3,1,1) without ar1, ar2 and ar3",
+     col = c("black", "blue", "red", "red"))
+```
+
+Let's perform error measures
+
+```{r}
+heavy_metal.2.2$mae.heavy_metal<-  abs(heavy_metal.2.2$heavy_metal -heavy_metal.2.2$mean)
+heavy_metal.2.2$mse.heavy_metal <-  (heavy_metal.2.2$heavy_metal - heavy_metal.2.2$mean) ^ 2
+heavy_metal.2.2$mape.heavy_metal<-  abs((heavy_metal.2.2$heavy_metal - heavy_metal.2.2$mean)/heavy_metal.2.2$heavy_metal)
+heavy_metal.2.2$amape.heavy_metal <-  abs((heavy_metal.2.2$heavy_metal - heavy_metal.2.2$mean) / 
+                                                (heavy_metal.2.2$heavy_metal + heavy_metal.2.2$mean))
+
+dim(heavy_metal.2.2)
+error.arima311_heavy_metal <- colMeans(heavy_metal.2.2[,5:8],na.rm = TRUE)
+error.arima311_heavy_metal
+```
+
+## 6.Comparison between VAR and ARIMA models.
+
+1.  **For our key words "rock and roll"**
+
+```{r}
+var2_error_measures_rock_and_roll
+error.arima111
+compara.1 <- rbind(var2_error_measures_rock_and_roll, error.arima111)
+compara.1
+```
+
+Based on comparison above VAR(2,2) is more accurate than arima_111.
+
+2.  **For our key words "heavy metal"**
+
+```{r}
+var2_error_measures_heavy_metal
+error.arima311_heavy_metal
+
+compare.2 <- rbind(var2_error_measures_heavy_metal, error.arima311_heavy_metal )
+compare.2
+```
+
+VAR(2,2) is much more accurate than arima_311.
+
+##7.Conclusion
+
+In conclusion,in the data sets we analyzed above, VAR(2,2) can be better than ARIMA models.
